@@ -1,0 +1,201 @@
+---
+# prevent deployment updates from terminating all pods
+# at one time
+apiVersion: policy/v1beta1
+kind: PodDisruptionBudget
+metadata:
+  name: example
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: example
+---
+# wordpress configuration allows uploads much larger than
+# the default configuration. Useful for site migration tools
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: example-php
+  namespace: default
+data:
+  uploads.ini: |
+    file_uploads = On
+    memory_limit = 512M
+    upload_max_filesize = 512M
+    post_max_size = 512M
+    max_execution_time = 600
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: example
+  labels:
+    app: example
+spec:
+  # start with two replicas, also see the HPA config
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    # during updates, allow 1 extra and 1 unavailable pod, this prevents surging
+    # which can cause the node group to auto scale even when load is low, due to
+    # the total pod cpu / mem request increasing with each pod
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: example
+  template:
+    metadata:
+      labels:
+        app: example
+    spec:
+      affinity:
+        # schedule each pod on seperate nodes, if possible. this increases reliablity
+        # when worker nodes are preempted by Google Cloud
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchExpressions:
+                - key: application
+                  operator: In
+                  values:
+                  - example
+      # run only on our wordpress node pool
+      nodeSelector:
+        purpose: wordpress
+      containers:
+        - image: wordpress:5.2.2
+          name: wordpress
+          env:
+          - name: WORDPRESS_DB_HOST
+            valueFrom:
+              secretKeyRef:
+                name: mysql-address
+                key: address
+          - name: WORDPRESS_DB_NAME
+            value: example
+          - name: WORDPRESS_DB_USER
+            value: example
+          - name: WORDPRESS_DB_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: mysql-example
+                key: password
+          ports:
+            - containerPort: 80
+              name: example
+          resources:
+            requests:
+              cpu: 60m
+              memory: "150Mi"
+            limits:
+              cpu: 200m
+              memory: "250Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+              httpHeaders:
+              - name: Host
+                value: example.com
+            initialDelaySeconds: 10
+            periodSeconds: 60
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+              httpHeaders:
+              - name: Host
+                value: example.com
+          lifecycle:
+            # sleep for 10 seconds after the pod is removed from the service. This allows
+            # requests that just came in to have time to finish. Then call the apache graceful-stop
+            # command to purge any outstanding requests. This process drastically improves site uptime
+            # during pod replacement
+            preStop:
+              exec:
+                command: [
+                "sh", "-c",
+                "sleep 10 && /usr/sbin/apachectl -k graceful-stop",
+              ]
+          volumeMounts:
+            - name: example-persistent-storage
+              mountPath: /var/www/html
+            - name: example-php
+              mountPath: /usr/local/etc/php/conf.d/uploads.ini
+              subPath: uploads.ini
+      volumes:
+        - name: example-persistent-storage
+          persistentVolumeClaim:
+            claimName: example-nfs
+        - name: example-php
+          configMap:
+            name: example-php
+---
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: example
+  namespace: default
+spec:
+  maxReplicas: 5
+  minReplicas: 2
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: example
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      targetAverageUtilization: 70
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: example
+spec:
+  ports:
+  - name: example
+    targetPort: 80
+    port: 80
+  selector:
+    app: example
+---
+# ingress will inform nginx of the wordpress service
+apiVersion: networking.k8s.io/v1beta1
+kind: Ingress
+metadata:
+  name: example
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    # use LetsEncrypt staging issuer to get a fake TLS certificate, suitable
+    # for example use only. Use prod issuer for sites with valid DNS records
+    # pointing at this cluster
+    cert-manager.io/cluster-issuer: "letsencrypt-staging"
+spec:
+  tls:
+  - hosts:
+    - example.com
+    - www.example.com
+    secretName: example-tls
+  rules:
+  - host: example.com
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: example
+          servicePort: example
+  - host: www.example.com
+    http:
+      paths:
+      - path: /
+        backend:
+          serviceName: example
+          servicePort: example

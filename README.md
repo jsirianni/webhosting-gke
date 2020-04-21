@@ -368,7 +368,7 @@ This example does not take advantage of several factors that you may find import
 - CloudSQL uses a public address, [you should take the extra steps required to use a Private Address](https://cloud.google.com/sql/docs/mysql/private-ip)
 - Infrastructure is deployed using gcloud cli, a production environment should consider using something like [Terraform](https://www.terraform.io/)
 - Everything uses the `default` [namespace](https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/). This may not be suitable for multi tenant or secure environments
-- NFS is a pod in he cluster. Production environment should consider several alternatives:
+- NFS is a pod in the cluster. Production environment should consider several alternatives:
   - Upgrading or replacing the NFS worker node will cause brief downtime for all wordpress sites
   - Use a dedicated NFS server on GCE
   - Use [FileStore](https://cloud.google.com/filestore), fairly expensive
